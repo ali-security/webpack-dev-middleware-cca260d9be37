@@ -8,6 +8,7 @@ import memfs, { createFsFromVolume, Volume } from "memfs";
 import del from "del";
 
 import middleware from "../src";
+import getFilenameFromUrl from "../src/utils/getFilenameFromUrl";
 
 import getCompiler from "./helpers/getCompiler";
 import isWebpack5 from "./helpers/isWebpack5";
@@ -63,6 +64,88 @@ describe.each([
     }
 
     describe("basic", () => {
+      // @see https://github.com/webpack/webpack-dev-middleware/security/advisories/GHSA-g84c-rxfj-3j2c
+      describe("should not allow path traversal when publicPath has no trailing slash", () => {
+        let compiler;
+
+        const outputPath = path.resolve(
+          __dirname,
+          "./outputs/traversal-no-slash-public-path"
+        );
+
+        beforeAll((done) => {
+          compiler = getCompiler({
+            ...webpackConfig,
+            output: {
+              filename: "bundle.js",
+              path: outputPath,
+              publicPath: "/static",
+            },
+          });
+
+          instance = middleware(compiler);
+
+          app = framework();
+          app.use(instance);
+
+          listen = listenShorthand(done);
+
+          instance.context.outputFileSystem.mkdirSync(outputPath, {
+            recursive: true,
+          });
+          instance.context.outputFileSystem.writeFileSync(
+            path.resolve(outputPath, "index.html"),
+            "HTML"
+          );
+          // A sensitive file placed one level above the served output root.
+          instance.context.outputFileSystem.writeFileSync(
+            path.resolve(outputPath, "../secret.txt"),
+            "TOP SECRET"
+          );
+
+          req = request(app);
+        });
+
+        afterAll(close);
+
+        it('should serve a legitimate file under the "/static" prefix', async () => {
+          const response = await req.get("/static/index.html");
+
+          expect(response.statusCode).toEqual(200);
+        });
+
+        it("should not allow to get files above root", async () => {
+          const response = await req.get("/static../secret.txt");
+
+          expect(response.statusCode).toEqual(404);
+          expect(response.text).not.toContain("TOP SECRET");
+
+          const extra = {};
+          const filename = getFilenameFromUrl(
+            instance.context,
+            "/static../secret.txt",
+            extra
+          );
+
+          expect(filename).toBeUndefined();
+          expect(extra.errorCode).toEqual(403);
+        });
+
+        it("should not allow to get files above root using percent-encoded dots", async () => {
+          const response = await req.get("/static%2e%2e/secret.txt");
+
+          expect(response.statusCode).toEqual(404);
+          expect(response.text).not.toContain("TOP SECRET");
+        });
+
+        it("should not allow to get files above root using a backslash separator", async () => {
+          const response = await req.get("/static..%5Csecret.txt");
+
+          expect(response.statusCode).toEqual(404);
+          expect(response.text).not.toContain("TOP SECRET");
+        });
+      });
+
       describe("should work", () => {
         let compiler;
         let codeContent;
